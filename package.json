@@ -1,0 +1,45 @@
+{
+	"name": "code-guardian-ext",
+	"displayName": "CodeGuardian",
+	"description": "強大的程式碼審查與自動化測試助手",
+	"version": "0.0.1",
+	"publisher": "Gordon Cheng",
+	"main": "./out/extension.js",
+	"activationEvents": [
+		"onChatParticipant:codeguardian.expert"
+	],
+	"engines": {
+		"vscode": "^1.90.0"
+	},
+	"categories": [
+		"AI",
+		"Chat"
+	],
+	"contributes": {
+		"chatParticipants": [
+			{
+				"id": "codeguardian.expert",
+				"name": "guardian",
+				"description": "強大的程式碼審查與自動化測試助手",
+				"isSticky": true
+			}
+		]
+	},
+	"scripts": {
+		"vscode:prepublish": "npm run compile",
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./",
+		"pretest": "npm run compile && npm run lint",
+		"lint": "eslint src --ext ts",
+		"test": "node ./out/test/runTest.js"
+	},
+	"devDependencies": {
+		"@types/vscode": "^1.90.0",
+		"@types/mocha": "^10.0.6",
+		"@types/node": "18.x",
+		"@typescript-eslint/eslint-plugin": "^7.0.0",
+		"@typescript-eslint/parser": "^7.0.0",
+		"eslint": "^8.56.0",
+		"typescript": "^5.3.3"
+	}
+}
