@@ -2,44 +2,81 @@ import * as vscode from 'vscode';
 
 export function activate(context: vscode.ExtensionContext) {
     const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, token) => {
-
-        // 在 AI 回應前，先在聊天視窗顯示一個讀取中的進度條
-        stream.progress("CodeGuardian 正在深度分析中...");
+        stream.progress("CodeGuardian 正在掃描當前檔案與工作區環境...");
 
         try {
-            // 1. 取得 Copilot 提供的語言模型
-            const [model] = await vscode.lm.selectChatModels({ vendor: 'copilot'});
-
+            const [model] = await vscode.lm.selectChatModels({ vendor: 'copilot' });
             if (!model) {
-                stream.markdown("找不到可用的語言模型，請確認 GitHub Copilot 已正確登入並啟用。");
+                stream.markdown("找不到可用的語言模型。");
                 return;
             }
 
-            // 2. 建立對話上下文 (System Prompt + User Prompt)
-            // 這裡我們直接賦予它自動化測試與前端/後端技術棧的專業知識
+            // --- 1. 取得上下文情報 ---
+            const activeEditor = vscode.window.activeTextEditor;
+            const activeFileContent = activeEditor ? activeEditor.document.getText() : undefined;
+
+            const testFilesUris = await vscode.workspace.findFiles(
+                '**/*{Test.java,.spec.ts}', 
+                '**/node_modules/**'
+            );
+            
+            const testFilesList = testFilesUris
+                .slice(0, 10)
+                .map(uri => vscode.workspace.asRelativePath(uri))
+                .join('\n');
+
+            // --- 2. 構建 System Prompt (系統指令) ---
+            // 使用純字串樣板，這非常類似 Angular 中組合 HTML template 或 Java 中的字串串接
+            let systemPromptString = `
+你是一位資深的技術負責人，精通 Clean Code 原則與自動化測試架構。
+你的核心任務是協助開發者進行程式碼審查，並規劃高品質的測試。
+
+技術棧規範：
+- 後端測試：優先使用 Java 搭配 JUnit 5 與 Mockito。
+- 端到端 (E2E) 測試：優先使用 Angular 搭配 Playwright。
+- 回應時請使用專業的繁體中文，並提供具體的程式碼範例。
+`;
+            // 動態附加工作區資訊
+            if (testFilesList) {
+                systemPromptString += `\n目前工作區內已存在的測試檔案列表（供參考命名與架構）：\n${testFilesList}\n`;
+            }
+
+            // --- 3. 構建 User Prompt (使用者輸入) ---
+            let userPromptString = request.prompt;
+            
+            // 動態附加當前檔案內容
+            if (activeFileContent) {
+                userPromptString = `
+我目前正在編輯的檔案內容如下：
+\`\`\`
+${activeFileContent}
+\`\`\`
+
+我的問題是：${request.prompt}
+`;
+            }
+
+            // --- 4. 封裝為 VS Code 訊息陣列 ---
+            // VS Code LM API 不支援 System role，將 system prompt 合併至 User 訊息
             const messages = [
-                vscode.LanguageModelChatMessage.User(
-                    "你是一位資深的技術負責人，精通 Clean Code 原則與自動化測試架構。你特別擅長處理 Java 搭配 JUnit 5 的後端測試，以及 Angular 搭配 Playwright 的端到端 (E2E) 測試。請用專業、嚴謹的繁體中文回答使用者的問題，如果需要，請直接給出具體的重構或測試程式碼範例。"
-                ),
-                vscode.LanguageModelChatMessage.User(request.prompt)
-            ];           
+                vscode.LanguageModelChatMessage.User(`${systemPromptString}\n\n${userPromptString}`)
+            ];
 
-            // 3. 發送請求給模型
+            // --- 5. 發送請求與串流回應 ---
             const chatResponse = await model.sendRequest(messages, {}, token);
-
-            // 4. 將 AI 產生的結果一段一段「即時串流」回聊天視窗 (打字機效果)
             for await (const fragment of chatResponse.text) {
                 stream.markdown(fragment);
             }
 
-        } catch (error) {
-            stream.markdown(`呼叫API時發生錯誤: ${error}`);
+        } catch (err) {
+            stream.markdown(`呼叫 AI 模型時發生錯誤：${err}`);
         }
+        
+        return { metadata: { command: request.command } };
     };
 
     const participant = vscode.chat.createChatParticipant('codeguardian.expert', handler);
     participant.iconPath = new vscode.ThemeIcon('beaker');
-
     context.subscriptions.push(participant);
 }
 
