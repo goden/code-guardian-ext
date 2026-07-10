@@ -21,7 +21,17 @@
 				"id": "codeguardian.expert",
 				"name": "guardian",
 				"description": "強大的程式碼審查與自動化測試助手",
-				"isSticky": true
+				"isSticky": true,
+				"commands": [
+					{
+						"name": "test",
+						"description": "為當前檔案產生 JUnit 5 或 Playwright 測試腳本"
+					},
+					{
+						"name": "refactor",
+						"description": "重構當前檔案，檢查壞味道 (Code Smell) 並提升可讀性"
+					}
+				]
 			}
 		]
 	},

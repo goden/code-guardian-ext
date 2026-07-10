@@ -25,13 +25,22 @@ export function activate(context: vscode.ExtensionContext) {
                 .map(uri => vscode.workspace.asRelativePath(uri))
                 .join('\n');
 
-            // --- 2. 構建 System Prompt (系統指令) ---
+            // --- 2. 根據Slash Command的參數，決定要執行的動作 ---
+            let taskInstruction = "你的核心任務是協助開發者解答任何程式碼相關問題。";
+
+            if(request.command === 'test') {
+                taskInstruction = "你的核心任務是：忽略使用者的閒聊，直接為當前提供的程式碼撰寫高品質的自動化測試。請務必包含正常路徑與邊界條件。";
+            } else if (request.command === 'refactor'){
+                taskInstruction = "你的核心任務是：對當前程式碼進行深度 Code Review，指出潛在的效能瓶頸或設計瑕疵，並直接給出重構後的程式碼對比。";
+            }
+
+            // --- 3. 構建 System Prompt (系統指令) ---
             // 使用純字串樣板，這非常類似 Angular 中組合 HTML template 或 Java 中的字串串接
             let systemPromptString = `
 你是一位資深的技術負責人，精通 Clean Code 原則與自動化測試架構。
-你的核心任務是協助開發者進行程式碼審查，並規劃高品質的測試。
+${taskInstruction}
 
-技術棧規範：
+技術端規範：
 - 後端測試：優先使用 Java 搭配 JUnit 5 與 Mockito。
 - 端到端 (E2E) 測試：優先使用 Angular 搭配 Playwright。
 - 回應時請使用專業的繁體中文，並提供具體的程式碼範例。
@@ -41,8 +50,8 @@ export function activate(context: vscode.ExtensionContext) {
                 systemPromptString += `\n目前工作區內已存在的測試檔案列表（供參考命名與架構）：\n${testFilesList}\n`;
             }
 
-            // --- 3. 構建 User Prompt (使用者輸入) ---
-            let userPromptString = request.prompt;
+            // --- 4. 構建 User Prompt (使用者輸入) ---
+            let userPromptString = request.prompt || "請執行你的核心任務。";
             
             // 動態附加當前檔案內容
             if (activeFileContent) {
@@ -52,17 +61,16 @@ export function activate(context: vscode.ExtensionContext) {
 ${activeFileContent}
 \`\`\`
 
-我的問題是：${request.prompt}
+使用者的補充說明：${userPromptString}
 `;
             }
 
-            // --- 4. 封裝為 VS Code 訊息陣列 ---
+            // --- 5. 封裝為 VS Code 訊息陣列 ---
             // VS Code LM API 不支援 System role，將 system prompt 合併至 User 訊息
             const messages = [
                 vscode.LanguageModelChatMessage.User(`${systemPromptString}\n\n${userPromptString}`)
             ];
-
-            // --- 5. 發送請求與串流回應 ---
+            
             const chatResponse = await model.sendRequest(messages, {}, token);
             for await (const fragment of chatResponse.text) {
                 stream.markdown(fragment);
