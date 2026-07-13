@@ -24,30 +24,59 @@ export function activate(context: vscode.ExtensionContext) {
 
                 // 2. 決定要執行的指令：讀取使用者的輸入，若無則預設為 git status
                 // 可改成 `mvn clean test` 或是公司內部的 bash 腳本
-                const commandToExecute = request.prompt.trim() || 'git status';
+                const commandToExecute = request.prompt.trim() || 'mvn clean test';
                 stream.markdown(`> 準備於本機執行：\`${commandToExecute}\`\n\n`);
 
-                // 3. 執行指令並等待結果
-                const { stdout, stderr } = await execAsync(commandToExecute, { 
-                    cwd: currentWorkspacePath // 指定執行目錄
-                });
-
-                // 4. 將執行結果回傳給使用者
-                if (stdout) {
-                    stream.markdown("✅ **執行成功，輸出結果：**\n");
-                    stream.markdown(`\`\`\`text\n${stdout}\n\`\`\`\n`);
+                let terminalOutput = "";
+                try {
+                    // 執行成功 (Exit Code 0)
+                    const { stdout, stderr } = await execAsync(commandToExecute, { cwd: currentWorkspacePath });
+                    terminalOutput = `【標準輸出 (stdout)】:\n${stdout}\n\n【標準錯誤 (stderr)】:\n${stderr}`;
+                } catch (execErr: any) {
+                    // 執行失敗 (Exit Code 非 0，例如編譯錯誤或測試失敗)
+                    // execErr 物件中會夾帶執行失敗時的 Console Log
+                    terminalOutput = `【執行異常訊息】:\n${execErr.message}\n\n【標準輸出 (stdout)】:\n${execErr.stdout}\n\n【標準錯誤 (stderr)】:\n${execErr.stderr}`;
                 }
-                if (stderr) {
-                    stream.markdown("⚠️ **執行過程中有錯誤輸出：**\n");
-                    stream.markdown(`\`\`\`text\n${stderr}\n\`\`\`\n`);
+
+                // --- 取得終端機 Log 後，呼叫 LLM 進行深度分析 ---
+                stream.progress("指令執行完畢，正在交由 AI 分析 Log 與錯誤...");
+
+                const [model] = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+                if (!model) {
+                    stream.markdown("找不到可用的語言模型。");
+                    return { metadata: { command: request.command } };
+                }
+
+                const systemPromptString = `
+你是一位資深的 Java 技術負責人與 DevOps 專家。
+你的任務是分析使用者在本地終端機執行指令後的輸出結果 (Console Log)。
+- 如果執行成功，請簡短總結結果。
+- 如果有錯誤（例如 Maven 建置失敗、Java 編譯錯誤、JUnit 測試未通過），請直接指出問題的根本原因 (Root Cause)，並提供修復建議或具體的程式碼修改方案。
+- 請過濾掉不重要的 Log，直指核心。
+`;
+
+                const userPromptString = `
+我剛才在專案根目錄執行了指令：\`${commandToExecute}\`
+以下是終端機的完整輸出紀錄：
+\`\`\`text
+${terminalOutput}
+\`\`\`
+請幫我分析這個結果。
+`;
+                const messages = [
+                    vscode.LanguageModelChatMessage.User(`${systemPromptString}\n\n${userPromptString}`)
+                ];
+
+                const chatResponse = await model.sendRequest(messages, {}, token);
+                for await (const fragment of chatResponse.text) {
+                    stream.markdown(fragment);
                 }
 
             } catch (err: any) {
-                // 捕捉指令執行失敗 (例如找不到指令)
-                stream.markdown(`❌ **指令執行失敗**：\n\`\`\`text\n${err.message}\n\`\`\``);
+                stream.markdown(`系統發生錯誤：${err.message}`);
             }
 
-            // 提早 Return，不呼叫 LLM
+            // 提早 Return，結束任務
             return { metadata: { command: request.command } };
         }
 
