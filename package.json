@@ -38,6 +38,10 @@
 					{
 						"name": "local",
 						"description": "在本地端執行專案指令 (例如 Git 狀態或 Maven 建置)"
+					},
+					{
+						"name": "analyze",
+            			"description": "【進階】精確解析 Java/TS 語法樹，精準盤點需要測試的方法"
 					}
 				]
 			}
