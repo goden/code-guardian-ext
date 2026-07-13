@@ -34,6 +34,10 @@
 					{
 						"name": "refactor",
 						"description": "重構當前檔案，檢查壞味道 (Code Smell) 並提升可讀性"
+					},
+					{
+						"name": "local",
+						"description": "在本地端執行專案指令 (例如 Git 狀態或 Maven 建置)"
 					}
 				]
 			}
@@ -48,13 +52,13 @@
 		"test": "node ./out/test/runTest.js"
 	},
 	"devDependencies": {
+		"@stylistic/eslint-plugin": "^5.10.0",
 		"@types/mocha": "^10.0.6",
-		"@types/node": "18.x",
+		"@types/node": "^18.19.130",
 		"@types/vscode": "^1.90.0",
-		"@typescript-eslint/eslint-plugin": "^7.0.0",
-		"@typescript-eslint/parser": "^7.0.0",
-		"eslint": "^8.56.0",
-		"typescript": "^5.3.3"
+		"eslint": "^9.0.0",
+		"typescript": "^5.3.3",
+		"typescript-eslint": "^8.63.0"
 	},
 	"dependencies": {
 		"@vscode/prompt-tsx": "^0.4.0-alpha.9"
