@@ -8,6 +8,84 @@ const execAsync = promisify(exec);
 export function activate(context: vscode.ExtensionContext) {
     const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, token) => {
 
+        // --- 攔截 /analyze 指令：讀取語法樹結構 ---
+        if (request.command === 'analyze') {
+            stream.progress("CodeGuardian 正在解析檔案的語法樹結構 (AST)...");
+            
+            try {
+                const activeEditor = vscode.window.activeTextEditor;
+                if (!activeEditor) {
+                    stream.markdown("❌ 錯誤：請先開啟一個 Java 或 TypeScript 檔案。");
+                    return { metadata: { command: request.command } };
+                }
+                const document = activeEditor.document;
+
+                // 呼叫 VS Code 內建的 Provider 來取得文件的結構樹 (AST Symbols)
+                const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+                    'vscode.executeDocumentSymbolProvider',
+                    document.uri
+                );
+
+                if (!symbols || symbols.length === 0) {
+                    stream.markdown("⚠️ 無法解析此檔案的結構，請確認你的 Java/Angular 擴充套件已正確載入。");
+                    return { metadata: { command: request.command } };
+                }
+
+                stream.markdown(`> 成功擷取檔案結構，正在梳理核心業務邏輯...\n\n`);
+
+                // 遞迴解析語法樹，只提取 Class 和 Method，過濾掉變數等雜訊
+                let structureInfo = "檔案結構分析結果：\n";
+                
+                const extractSymbols = (syms: vscode.DocumentSymbol[], indent: string = "") => {
+                    for (const sym of syms) {
+                        // SymbolKind.Class = 5, SymbolKind.Method = 6
+                        if (sym.kind === vscode.SymbolKind.Class) {
+                            structureInfo += `${indent}📦 類別: **${sym.name}**\n`;
+                            extractSymbols(sym.children, indent + "  ");
+                        } else if (sym.kind === vscode.SymbolKind.Method || sym.kind === vscode.SymbolKind.Function) {
+                            structureInfo += `${indent}⚙️ 方法: \`${sym.name}\` (詳細簽章: ${sym.detail})\n`;
+                        }
+                    }
+                };
+                
+                extractSymbols(symbols);
+
+                // 先把我們抓到的乾淨結構印出來讓你看
+                stream.markdown("### 🔍 提取出的程式結構\n");
+                stream.markdown(structureInfo + "\n\n");
+
+                // --- 接著將乾淨的結構餵給 LLM，請它規劃測試策略 ---
+                stream.progress("正在交由 AI 根據結構規劃 JUnit 5 / Playwright 測試...");
+
+                const [model] = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+                if (!model) return { metadata: { command: request.command } };
+
+                const systemPromptString = `
+你是一位嚴謹的架構師。使用者會提供你一份由 AST 解析出來的「類別與方法結構清單」，而不是冗長的原始碼。
+你的任務是：
+1. 分析這些方法，挑選出哪些是業務邏輯 (需要寫測試)，哪些是 Getter/Setter (不一定需要測試)。
+2. 針對需要測試的核心方法，列出對應的 JUnit 5 或 Playwright 測試案例 (Test Cases) 大綱。
+3. 如果發現方法名稱不符合 Clean Code (例如命名含糊)，請直接提出重構建議。
+`;
+                const userPromptString = `這是當前檔案的結構：\n${structureInfo}`;
+
+                const messages = [
+                    vscode.LanguageModelChatMessage.User(`${systemPromptString}\n\n${userPromptString}`)
+                ];
+
+                const chatResponse = await model.sendRequest(messages, {}, token);
+                stream.markdown("### 📝 測試架構規劃建議\n");
+                for await (const fragment of chatResponse.text) {
+                    stream.markdown(fragment);
+                }
+
+            } catch (err: any) {
+                stream.markdown(`系統發生錯誤：${err.message}`);
+            }
+            
+            return { metadata: { command: request.command } };
+        }
+
         // --- 攔截 /local 指令：執行本地腳本或指令 ---
         if (request.command === 'local') {
             stream.progress("CodeGuardian 正在執行本機指令...");
