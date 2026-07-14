@@ -162,15 +162,17 @@ ${terminalOutput}
         // 下方為先前實作的 /test 與 /refactor 呼叫 Copilot LLM 的邏輯...
         // 這裡要保留
         // ==========================================
-
-        try {
-
-            const [model] = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+        if (request.command == 'test' || request.command == 'refactor') {
+            stream.progress("CodeGuardian 正在執行明確任務...");
+            
+            try {
+    
+                const [model] = await vscode.lm.selectChatModels({ vendor: 'copilot' });
                 if (!model) {
                     stream.markdown("找不到可用的語言模型。");
-                    return;
+                    return { metadata: { command: request.command } };
                 }
-    
+        
                 // --- 1. 取得上下文情報 ---
                 const activeEditor = vscode.window.activeTextEditor;
                 const activeFileContent = activeEditor ? activeEditor.document.getText() : undefined;
@@ -179,7 +181,7 @@ ${terminalOutput}
                     '**/*{Test.java,.spec.ts}', 
                     '**/node_modules/**'
                 );
-                
+                    
                 const testFilesList = testFilesUris
                     .slice(0, 10)
                     .map(uri => vscode.workspace.asRelativePath(uri))
@@ -193,55 +195,237 @@ ${terminalOutput}
                 } else if (request.command === 'refactor'){
                     taskInstruction = "你的核心任務是：對當前程式碼進行深度 Code Review，指出潛在的效能瓶頸或設計瑕疵，並直接給出重構後的程式碼對比。";
                 }
-    
+        
                 // --- 3. 構建 System Prompt (系統指令) ---
                 // 使用純字串樣板，這非常類似 Angular 中組合 HTML template 或 Java 中的字串串接
                 let systemPromptString = `
-    你是一位資深的技術負責人，精通 Clean Code 原則與自動化測試架構。
-    ${taskInstruction}
-    
-    技術端規範：
-    - 後端測試：優先使用 Java 搭配 JUnit 5 與 Mockito。
-    - 端到端 (E2E) 測試：優先使用 Angular 搭配 Playwright。
-    - 回應時請使用專業的繁體中文，並提供具體的程式碼範例。
-    `;
+                    你是一位資深的技術負責人，精通 Clean Code 原則與自動化測試架構。
+                    ${taskInstruction}
+        
+                    技術端規範：
+                    - 後端測試：優先使用 Java 搭配 JUnit 5 與 Mockito。
+                    - 端到端 (E2E) 測試：優先使用 Angular 搭配 Playwright。
+                    - 回應時請使用專業的繁體中文，並提供具體的程式碼範例。
+                    `;
+
                 // 動態附加工作區資訊
                 if (testFilesList) {
                     systemPromptString += `\n目前工作區內已存在的測試檔案列表（供參考命名與架構）：\n${testFilesList}\n`;
                 }
-    
+        
                 // --- 4. 構建 User Prompt (使用者輸入) ---
                 let userPromptString = request.prompt || "請執行你的核心任務。";
-                
+                    
                 // 動態附加當前檔案內容
                 if (activeFileContent) {
                     userPromptString = `
-    我目前正在編輯的檔案內容如下：
-    \`\`\`
-    ${activeFileContent}
-    \`\`\`
-    
-    使用者的補充說明：${userPromptString}
-    `;
+                        我目前正在編輯的檔案內容如下：
+                        \`\`\`
+                        ${activeFileContent}
+                        \`\`\`
+                        
+                        使用者的補充說明：${userPromptString}
+                `;
                 }
-    
+        
                 // --- 5. 封裝為 VS Code 訊息陣列 ---
                 // VS Code LM API 不支援 System role，將 system prompt 合併至 User 訊息
                 const messages = [
                     vscode.LanguageModelChatMessage.User(`${systemPromptString}\n\n${userPromptString}`)
                 ];
-                
+                    
                 const chatResponse = await model.sendRequest(messages, {}, token);
                 for await (const fragment of chatResponse.text) {
                     stream.markdown(fragment);
                 }
+        
+                } catch (err) {
+                    stream.markdown(`呼叫 AI 模型時發生錯誤：${err}`);
+                }
     
-            } catch (err) {
-                stream.markdown(`呼叫 AI 模型時發生錯誤：${err}`);
+            
+            return { metadata: { command: request.command } };
+        }
+
+
+        // ==========================================
+        // 4. 最後才是：一般對話區塊 (導入 Tools API 工具調用)
+        // 當 request.command 為 undefined 時，就會走到這裡
+        // ==========================================
+        stream.progress("CodeGuardian 正在思考解決方案...");
+
+        try {
+            const [model] = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+            if (!model) {
+                stream.markdown("找不到可用的語言模型。");
+                return { metadata: { command: request.command } };
             }
 
-        
+            // 1. 宣告 AI 可以使用的工具箱
+            const options: vscode.LanguageModelChatRequestOptions = {
+                justification: "需要分析專案測試覆蓋率",
+                tools: [
+                    // ... 放入 scan_missing_tests 工具宣告
+                    {
+                        name: "scan_missing_tests",
+                        description: "掃描目前工作區，找出有實作邏輯但缺乏對應 JUnit 5 或 Playwright 測試檔的類別或元件。",
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                targetLang: {
+                                    type: "string",
+                                    description: "要掃描的目標語言，例如 'java' 或 'typescript'"
+                                }
+                            },
+                            required: ["targetLang"]
+                        }
+                    }
+                ]
+            };
+
+            const systemPrompt = `你是一位資深的架構師。請根據使用者的問題，判斷是否需要呼叫工具。如果使用者詢問測試狀態，請大膽呼叫 'scan_missing_tests' 工具來獲取實際數據，然後再以繁體中文回答。`;
+
+            // 由於 Tools API 會有「多次往返 (Multi-turn)」的特性，我們使用陣列來維護對話歷史
+            const messages = [
+                vscode.LanguageModelChatMessage.User(systemPrompt),
+                vscode.LanguageModelChatMessage.User(request.prompt || "請協助我分析專案的測試覆蓋率。")
+            ];
+
+            // 2. 發送第一次請求，讓 AI 決定是否要使用工具
+            const response = await model.sendRequest(messages, options, token);
+
+            // 3. 解析 AI 的回應串流
+            for await (const part of response.stream) {
+                // 如果 AI 只是單純練瘋話 (TextPart)，就直接印出來
+                if (part instanceof vscode.LanguageModelTextPart) {
+                    stream.markdown(part.value);
+                } else if (part instanceof vscode.LanguageModelToolCallPart) {
+                    
+                    // 如果 AI 回傳的是工具呼叫 (ToolCallPart)，就解析工具名稱與參數
+                    stream.progress(`AI 正在自動呼叫工具：${part.name}...`);
+                    
+                    if (part.name === "scan_missing_tests") {
+                        
+                        // 解析 AI 傳進來的參數
+                        const args = part.input as { targetLang: string };
+                        let scanResult = "";
+
+                        // 4.執行實地的本地邏輯(模擬檔案掃描)
+                        // 實務上呼叫 vscode.workspace.findFiles 進行真正的比對
+                        if (args.targetLang.toLowerCase() === 'java') {
+                            
+                            try {
+                                // 步驟 A: 找出所有的 Java 測試檔 (排除 node_modules 或 target 等編譯資料夾)
+                                const testFiles = await vscode.workspace.findFiles('**/*Test.java', '**/{node_modules,target,.git}/**');
+
+                                // 建立一個 Set，存放已經有測試檔的類別名稱 (例如 "UserServiceTest.java" -> "UserService")
+                                const testFileBaseNames = new Set(testFiles.map(uri => {
+                                    const fileName = uri.path.split('/').pop() || '';
+                                    return fileName.replace('Test.java', '');
+                                }));
+
+                                // 步驟 B: 找出所有的 Java 來源檔 (這裡簡單以排除 Test.java 來過濾)
+                                const sourceFiles = await vscode.workspace.findFiles('**/*.java', '**/*Test.java');
+
+                                const missingTests: string[] = [];
+
+                                // 步驟 C: 比對哪些來源檔沒有在 Set 裡面
+                                for (const uri of sourceFiles) {
+                                    const fileName = uri.path.split('/').pop() || '';
+                                    const baseName = fileName.replace('.java', '');
+                                    
+                                    // 實務上可以進一步略過 DTO, Entity 等不一定需要單元測試的檔案
+                                    if (!testFileBaseNames.has(baseName)) {
+                                        missingTests.push(fileName);
+                                    }
+                                }
+
+                                // 步驟 D: 組合給 AI 的結果報告
+                                if (missingTests.length === 0) {
+                                    scanResult = "掃描結果：Workspace內所有的 Java 檔都有對應的單位測試檔。";
+                                } else {
+                                    // 為了避免 Token 爆炸，我們最多只把前 5 個沒寫測試的檔案名稱餵給 AI
+                                    const topMissing = missingTests.slice(0, 5);
+                                    scanResult = `掃描結果：共發現 ${missingTests.length} 個 Java 檔案缺乏對應的測試檔。例如以下這些檔案需要優先處理：${topMissing.join(', ')}。`;
+                                }
+
+                            } catch (err) {
+                                scanResult = "掃描過程中發生錯誤，請確認工作區是否有 Java 專案。";
+                            }
+                        } else if (args.targetLang.toLowerCase() === 'typescript' || args.targetLang.toLowerCase() === 'angular') {
+                            
+                            // TypeScript 的掃描邏輯同理，比對 .ts 與 .spec.ts
+                            try {
+                                
+                                // 步驟 A: 找出所有的 TypeScript 測試檔 (排除 node_modules 或 dist 等資料夾)
+                                const tsTestFiles = await vscode.workspace.findFiles('**/*.spec.ts', '**/{node_modules,dist,out,.git}/**');
+
+                                // 建立 Set 存放基底名稱 (例如 "login.component.spec.ts" -> "login.component")
+                                const tsTestFileBaseNames = new Set(tsTestFiles.map(uri => {
+                                    const fileName = uri.path.split('/').pop() || '';
+                                    return fileName.replace('.spec.ts', '');
+                                }));
+
+                                // 步驟 B: 找出所有的 TypeScript 來源檔 (排除 .spec.ts 以過濾出純原始碼)
+                                const tsSourceFiles = await vscode.workspace.findFiles('**/*.ts', '**/{node_modules,dist,out,.git,*.spec.ts}/**');
+
+                                const tsMissingTests: string[] = [];
+
+                                // 步驟 C: 比對哪些來源檔沒有在 Set 裡面
+                                for (const uri of tsSourceFiles) {
+                                    const fileName = uri.path.split('/').pop() || '';
+                                    const baseName = fileName.replace('.ts', '');
+                                    
+                                    // 針對 Angular 專案的實務優化：略過 module 定義檔與環境變數檔
+                                    if (!fileName.endsWith('.module.ts') && !fileName.includes('environment')) {
+                                        if (!tsTestFileBaseNames.has(baseName)) {
+                                            tsMissingTests.push(fileName);
+                                        }
+                                    }
+                                }
+                                
+                                // 步驟 D: 組合給 AI 的結果報告
+                                if (tsMissingTests.length === 0) {
+                                    scanResult = "掃描結果：工作區內所有的 TypeScript/Angular 檔案都有對應的 .spec.ts 測試檔。";
+                                } else {
+                                    // 同樣採用防爆機制，只回傳前 5 個給 AI 進行 Playwright/Jasmine 測試規劃
+                                    const topMissing = tsMissingTests.slice(0, 5);
+                                    scanResult = `掃描結果：共發現 ${tsMissingTests.length} 個 TypeScript 檔案缺乏對應的測試檔。例如以下這些檔案需要優先處理：${topMissing.join(', ')}。`;
+                                }
+
+                            } catch (err:any) {
+                                scanResult = "掃描 TypeScript 工作區時發生錯誤。";
+                            }
+
+                        } else {
+                            scanResult = "目前僅支援 Java 與 TypeScript 的掃描。";
+                        }
+
+                        // 5. 將工具執行的結果「加回對話歷史中」，發送第二次請求給 AI
+                        messages.push(new vscode.LanguageModelChatMessage(vscode.LanguageModelChatMessageRole.Assistant, [part]));
+                        messages.push(new vscode.LanguageModelChatMessage(vscode.LanguageModelChatMessageRole.User, [
+                            new vscode.LanguageModelToolResultPart(part.callId, [new vscode.LanguageModelTextPart(scanResult)])
+                        ]));
+
+                        stream.progress(`工具執行完畢，正在總結報告...`);
+
+                        // 再次呼叫模型，這次模型會根據工具回傳的數據生成最終答案
+                        const finalResponse = await model.sendRequest(messages, options, token);
+                        for await (const finalPart of finalResponse.stream) {
+                            if (finalPart instanceof vscode.LanguageModelTextPart) {
+                                stream.markdown(finalPart.value);
+                            }
+                        }
+                    }
+                }
+            }
+
+        } catch (err:any) {
+            stream.markdown(`呼叫 AI 模型時發生錯誤：${err}`);
+        }
+
         return { metadata: { command: request.command } };
+
     };
 
     const participant = vscode.chat.createChatParticipant('codeguardian.expert', handler);
