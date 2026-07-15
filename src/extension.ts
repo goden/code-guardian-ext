@@ -6,6 +6,105 @@ import { promisify } from 'util';
 const execAsync = promisify(exec);
 
 export function activate(context: vscode.ExtensionContext) {
+
+    // ==========================================
+    // Topic C：Headless Agent (Background Process)
+    // ==========================================
+    // step 1: Create a diagnostics collection (Draw a red underline squiggle in the editor)
+    const diagnosticsCollection = vscode.languages.createDiagnosticCollection("codeGuardian");
+    context.subscriptions.push(diagnosticsCollection);
+
+    // step 2: Watch for file-saving events to trigger diagnostics
+    context.subscriptions.push(
+        vscode.workspace.onDidSaveTextDocument(async (document) => {
+            
+            // only analyze Java and TypeScript files
+            if (document.languageId !== 'java' && document.languageId !== 'typescript') {
+                return;
+            }
+
+            // avoid scanning the empty file
+            const text = document.getText();
+            if (!text.trim()) {
+                return;
+            }
+
+            // show the progress in lower right corner of VS Code, no bothering the user.
+            vscode.window.withProgress({
+                location: vscode.ProgressLocation.Window,
+                title: "CodeGuardian 正在進行背景分析..."
+            }, async (progress) => {
+                try {
+
+                    const [model] = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+                    if (!model) return;
+
+                    // clear the warning underline squiggle for this document
+                    diagnosticsCollection.delete(document.uri);
+
+                    // Step 3: Ask the AI to follow the JSON schema
+                    const systemPromptString = `
+你是一個極度嚴格的 Code Reviewer。
+請分析以下程式碼，找出潛在的 Code Smell、效能瓶頸、或是可能發生 NullPointerException 的地方。
+你必須「只」回傳一個 JSON 陣列，絕對不能有任何其他的 Markdown 文字或解說。
+如果程式碼寫得很完美，請回傳空陣列 []。
+
+JSON 格式規範如下：
+[
+  {
+    "line": 發現問題的行號 (數字，從 0 開始計算),
+    "message": "具體的重構建議或警告",
+    "severity": "Warning" 或 "Error"
+  }
+]`;
+
+                    const messages = [
+                        vscode.LanguageModelChatMessage.User(systemPromptString),
+                        vscode.LanguageModelChatMessage.User(text)
+                    ];
+
+                    const chatResponse = await model.sendRequest(messages, {}, new vscode.CancellationTokenSource().token);
+
+                    let responseText = "";
+                    for await (const fragment of chatResponse.text) {
+                        responseText += fragment;
+                    }
+
+                    // Step 4: parse the JSON response and extract the JSON array
+                    // 使用正則表達式把 [] 之間的內容抓出來，防止 AI 擅自加上 ```json 標籤
+                    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+                    if (jsonMatch) {
+                        const issues = JSON.parse(jsonMatch[0]);
+                        const diagnostics: vscode.Diagnostic[] = [];
+
+                        issues.forEach((issue: any) => {
+
+                            // 確保行號不為負數 (VS Code API 的行號是 index 0 開始)
+                            const line = Math.max(0, issue.line);
+
+                            // 標示範圍：從該行的第 0 個字元畫到第 100 個字元
+                            const range = new vscode.Range(line, 0, line, 100);
+
+                            let severity = vscode.DiagnosticSeverity.Warning;
+                            if (issue.severity === "Error") severity = vscode.DiagnosticSeverity.Error;
+
+                            const diagnostic = new vscode.Diagnostic(range, `[CodeGuardian 建議] ${issue.message}`, severity);
+                            diagnostics.push(diagnostic);
+                        });
+
+                        // 5. 將波浪底線畫到當前檔案上！
+                        diagnosticsCollection.set(document.uri, diagnostics);
+
+                    }
+
+                } catch (err: any) {
+                    console.error("CodeGuardian 背景掃描失敗:", err);
+                }
+            });
+
+        })
+    );
+
     const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, token) => {
 
         // --- 攔截 /analyze 指令：讀取語法樹結構 ---
