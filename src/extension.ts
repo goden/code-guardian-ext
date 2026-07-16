@@ -6,6 +6,217 @@ import { promisify } from 'util';
 const execAsync = promisify(exec);
 
 export function activate(context: vscode.ExtensionContext) {
+
+    // ==========================================
+    //        無頭 Agent (背景守護行程)
+    // ==========================================
+
+    // Step 1: 建立診斷集合 (用來在編輯器畫波浪底線)
+    const diagnosticsCollection = vscode.languages.createDiagnosticCollection("codeGuardian");
+    context.subscriptions.push(diagnosticsCollection);
+
+    // Step 2. 監聽檔案存檔事件
+    context.subscriptions.push(
+        vscode.workspace.onDidSaveTextDocument(async (document) => {
+            
+            // only analyze Java and TypeScript files
+            if (document.languageId !== 'java' && document.languageId !== 'typescript') {
+                return;
+            }
+
+            // avoid scanning the empty file
+            const text = document.getText();
+            if (!text.trim()) {
+                return;
+            }
+
+            // show the progress in lower right corner of VS Code, no bothering the user.
+            vscode.window.withProgress({
+                location: vscode.ProgressLocation.Window,
+                title: "CodeGuardian 正在進行背景分析..."
+            }, async (progress) => {
+                try {
+
+                    const [model] = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+                    if (!model) return;
+
+                    // clear the warning underline squiggle for this document
+                    diagnosticsCollection.delete(document.uri);
+
+                    // Step 3. 嚴格要求 AI 回傳 JSON 格式
+                    const systemPromptString = `
+你是一個極度嚴格的 Code Reviewer。
+請分析以下程式碼，找出潛在的 Code Smell、效能瓶頸、或是可能發生 NullPointerException 的地方。
+你必須「只」回傳一個 JSON 陣列，絕對不能有任何其他的 Markdown 文字或解說。
+如果程式碼寫得很完美，請回傳空陣列 []。
+
+JSON 格式規範如下：
+[
+  {
+    "line": 發現問題的行號 (數字，從 0 開始計算),
+    "message": "具體的重構建議或警告",
+    "severity": "Warning" 或 "Error"
+  }
+]`;
+
+                    const messages = [
+                        vscode.LanguageModelChatMessage.User(systemPromptString),
+                        vscode.LanguageModelChatMessage.User(text)
+                    ];
+
+                    const chatResponse = await model.sendRequest(messages, {}, new vscode.CancellationTokenSource().token);
+
+                    let responseText = "";
+                    for await (const fragment of chatResponse.text) {
+                        responseText += fragment;
+                    }
+
+                    // Step 4: 解析 AI 回傳的字串，提取 JSON 陣列
+                    // 使用正規表達式把 [] 之間的內容抓出來，防止 AI 擅自加上 ```json 標籤
+                    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+                    if (jsonMatch) {
+                        const issues = JSON.parse(jsonMatch[0]);
+                        const diagnostics: vscode.Diagnostic[] = [];
+
+                        issues.forEach((issue: any) => {
+
+                            // 確保行號不為負數 (VS Code API 的行號是 index 0 開始)
+                            const line = Math.max(0, issue.line);
+
+                            // 標示範圍：從該行的第 0 個字元畫到第 100 個字元
+                            const range = new vscode.Range(line, 0, line, 100);
+
+                            let severity = vscode.DiagnosticSeverity.Warning;
+                            if (issue.severity === "Error") severity = vscode.DiagnosticSeverity.Error;
+
+                            const diagnostic = new vscode.Diagnostic(range, `[CodeGuardian 建議] ${issue.message}`, severity);
+                            diagnostics.push(diagnostic);
+                        });
+
+                        // 5. 將波浪底線畫到當前檔案上！
+                        diagnosticsCollection.set(document.uri, diagnostics);
+
+                    }
+
+                } catch (err: any) {
+                    console.error("CodeGuardian 背景掃描失敗:", err);
+                }
+            });
+
+        })
+    );
+
+    // ==========================================
+    // 小燈泡 (Code Action) 與自動修復
+    // ==========================================
+
+    // 1. 註冊自動修復的背景指令
+    context.subscriptions.push(
+        vscode.commands.registerCommand('codeguardian.applyFix', async (document: vscode.TextDocument, range: vscode.Range, diagnosticMessage: string) => {
+            
+            vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: "CodeGuardian: 正在自動修復程式碼...",
+                cancellable: false
+            }, async (progress) => {
+                try {
+                    const [model] = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+                    if (!model) return;
+
+                    // 擴展 Range，確保我們抓到的是整行程式碼
+                    const fullLineRange = new vscode.Range(range.start.line, 0, range.end.line, document.lineAt(range.end.line).text.length);
+                    const originalCode = document.getText(fullLineRange);
+                    const fullFileText = document.getText(); // 提供全檔作為上下文
+
+                    // 嚴格要求 AI 只回傳修復後的程式碼片段
+                    const systemPrompt = `
+你是一個程式碼自動修復機器人。
+使用者會提供你【整份檔案的上下文】、【有問題的那行程式碼】以及【修改建議】。
+你的任務是：根據建議，寫出用來「替換該行」的正確程式碼。
+⚠️ 極度重要限制：
+1. 你「只能」回傳修復後的純程式碼字串。
+2. 絕對不能包含 Markdown 語法 (如 \`\`\`java)。
+3. 絕對不能有任何開場白或解釋。
+4. 注意保持原本的縮排層級。
+`;
+                    const userPrompt = `
+修改建議：${diagnosticMessage}
+有問題的原始碼：
+${originalCode}
+
+檔案上下文參考：
+${fullFileText}
+`;
+
+                    const messages = [
+                        vscode.LanguageModelChatMessage.User(systemPrompt),
+                        vscode.LanguageModelChatMessage.User(userPrompt)
+                    ];
+
+                    const chatResponse = await model.sendRequest(messages, {}, new vscode.CancellationTokenSource().token);
+                    
+                    let newCode = "";
+                    for await (const fragment of chatResponse.text) {
+                        newCode += fragment;
+                    }
+
+                    // 濾除可能的幻覺 Markdown 標籤 (防呆機制)
+                    newCode = newCode.replace(/^```[a-z]*\n/gm, '').replace(/```$/gm, '').trimEnd();
+
+                    // 執行 WorkspaceEdit，直接修改編輯器內的程式碼
+                    const edit = new vscode.WorkspaceEdit();
+                    edit.replace(document.uri, fullLineRange, newCode);
+                    await vscode.workspace.applyEdit(edit);
+                    
+                    vscode.window.showInformationMessage("✅ CodeGuardian: 程式碼修復完成！");
+
+                } catch (err) {
+                    vscode.window.showErrorMessage("❌ CodeGuardian: 修復失敗，請自行查看建議。");
+                }
+            });
+        })
+    );
+
+    // 2. 註冊 CodeActionProvider (小燈泡選單)
+    class GuardianCodeActionProvider implements vscode.CodeActionProvider {
+        provideCodeActions(document: vscode.TextDocument, range: vscode.Range | vscode.Selection, context: vscode.CodeActionContext, token: vscode.CancellationToken): vscode.ProviderResult<(vscode.CodeAction | vscode.Command)[]> {
+            const actions: vscode.CodeAction[] = [];
+
+            // 檢查當前游標位置是否包含我們畫的波浪底線 (診斷訊息)
+            for (const diagnostic of context.diagnostics) {
+                // 確保這個警告是我們 CodeGuardian 發出的
+                if (diagnostic.message.startsWith('[CodeGuardian 建議]')) {
+                    
+                    // 建立一個 Quick Fix 動作
+                    const action = new vscode.CodeAction('🤖 請 CodeGuardian 自動修復此問題', vscode.CodeActionKind.QuickFix);
+                    
+                    // 將這個動作綁定到我們上面的指令，並把需要的參數傳過去
+                    action.command = {
+                        command: 'codeguardian.applyFix',
+                        title: '套用 AI 修復',
+                        arguments: [document, diagnostic.range, diagnostic.message]
+                    };
+                    
+                    action.diagnostics = [diagnostic];
+                    action.isPreferred = true; // 讓它出現在清單最上方
+                    
+                    actions.push(action);
+                }
+            }
+            return actions;
+        }
+    }
+
+    // 將小燈泡註冊到 Java 與 TypeScript 檔案中
+    context.subscriptions.push(
+        vscode.languages.registerCodeActionsProvider(
+            [{ language: 'java' }, { language: 'typescript' }], 
+            new GuardianCodeActionProvider(),
+            { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] }
+        )
+    );
+
+    // 以下為指令集
     const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, token) => {
 
         // --- 攔截 /analyze 指令：讀取語法樹結構 ---
