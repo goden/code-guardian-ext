@@ -42,6 +42,10 @@
 					{
 						"name": "analyze",
             			"description": "【進階】精確解析 Java/TS 語法樹，精準盤點需要測試的方法"
+					},
+					{
+						"name": "remote",
+						"description": "將程式碼交由 Java 8 企業級 Agent 伺服器分析"
 					}
 				]
 			}
