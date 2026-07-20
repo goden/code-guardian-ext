@@ -458,6 +458,114 @@ ${terminalOutput}
             return { metadata: { command: request.command } };
         }
 
+        // --- 攔截 /remote 指令：呼叫遠端 Java 8 Agent ---
+        if (request.command === 'remote') {
+
+            stream.progress("正在連線至本地 Java 8 Agent 伺服器...");
+
+            try {
+                // 1. 取得使用者輸入的程式碼片段
+                const activeEditor = vscode.window.activeTextEditor;
+                const activeFileContent = activeEditor ? activeEditor.document.getText() : "";
+
+                // 2. 呼叫本地 Java 8 Agent 伺服器 (假設它在 http://localhost:3030/analyze)
+                const response = await fetch('http://localhost:3030/api/agent/stream', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        query: request.prompt || "請幫我分析這段程式碼",
+                        code: activeFileContent
+                    })
+                });
+
+                if (!response.ok || !response.body) {
+                    stream.markdown(`❌ 連線失敗，請確認 Spring Boot 伺服器已啟動 (HTTP ${response.status})`);
+                    return { metadata: { command: request.command } };
+                }
+
+                // 2. 解析 Server-Sent Events (SSE) 串流
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder("utf-8");
+                let buffer = "";
+
+                while (true) {
+
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+
+                    // 保留最後一行未完整讀取的資料在 buffer 中
+                    buffer = lines.pop() || "";
+
+                    let currentEvent = "message";
+
+                    for (const line of lines) {
+                        if (line.startsWith('event:')) {
+                            currentEvent = line.replace('event:', '').trim();
+                        } else if (line.startsWith('data:')) {
+                            const data = line.replace('data:', '').trim();
+                            
+                            if (data === "[DONE]") {
+                                break; // 伺服器通知結束
+                            }
+
+                            // 根據 Java 傳來的 event 類型做不同處理
+                            if (currentEvent === "progress") {
+                                stream.progress(data); // 更新進度條
+                            } else if (currentEvent === "message") {
+                                // 處理 Java 傳來的換行符號編碼 (實務上常以 \\n 傳遞)
+                                const textChunk = data.replace(/\\n/g, '\n');
+                                stream.markdown(textChunk); // 渲染打字機效果
+                            } else if (currentEvent === "action") {
+                                try {
+                                    const payload = JSON.parse(data);
+    
+                                    if (payload.action === "create_file") {
+                                        const workspaceFolders = vscode.workspace.workspaceFolders;
+                                        if (workspaceFolders && workspaceFolders.length > 0) {
+                                            const rootUri = workspaceFolders[0].uri;
+    
+                                            // 組合出新檔案的完整路徑 (直接放在工作區根目錄)
+                                            const newFileUri = vscode.Uri.joinPath(rootUri, payload.filename);
+    
+                                            // 宣告 WorkspaceEdit
+                                            const edit = new vscode.WorkspaceEdit();
+    
+                                            // 若檔案不存在則建立並覆寫檔案內容
+                                            edit.createFile(newFileUri, { overwrite: true });
+                                            edit.insert(newFileUri, new vscode.Position(0, 0), payload.content);
+    
+                                            // 執行寫入動作
+                                            await vscode.workspace.applyEdit(edit);
+    
+                                            // 連帶把剛建立的檔案打開讓開發者看
+                                            const doc = await vscode.workspace.openTextDocument(newFileUri);
+                                            await vscode.window.showTextDocument(doc, { preview: false });
+    
+                                            // 在介面上彈出成功通知
+                                            vscode.window.showInformationMessage(`✅ CodeGuardian: 已自動生成測試檔 ${payload.filename}`);
+                                            stream.markdown(`✅ 已自動生成測試檔 \`${payload.filename}\`，並已打開編輯器。`);
+    
+                                        }
+                                    }
+                                } catch (parseErr:any) {
+                                    console.error("解析 action 事件失敗:", parseErr);
+                                }
+                            }
+                        }
+                    }
+
+                }
+
+            } catch (err:any) {
+                stream.markdown(`❌ 伺服器連線異常：${err.message}`);
+            }
+
+            return { metadata: { command: request.command } };
+        }
+
 
         // ==========================================
         // 4. 最後才是：一般對話區塊 (導入 Tools API 工具調用)
