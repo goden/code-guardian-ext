@@ -518,6 +518,41 @@ ${terminalOutput}
                                 // 處理 Java 傳來的換行符號編碼 (實務上常以 \\n 傳遞)
                                 const textChunk = data.replace(/\\n/g, '\n');
                                 stream.markdown(textChunk); // 渲染打字機效果
+                            } else if (currentEvent === "action") {
+                                try {
+                                    const payload = JSON.parse(data);
+    
+                                    if (payload.action === "create_file") {
+                                        const workspaceFolders = vscode.workspace.workspaceFolders;
+                                        if (workspaceFolders && workspaceFolders.length > 0) {
+                                            const rootUri = workspaceFolders[0].uri;
+    
+                                            // 組合出新檔案的完整路徑 (直接放在工作區根目錄)
+                                            const newFileUri = vscode.Uri.joinPath(rootUri, payload.filename);
+    
+                                            // 宣告 WorkspaceEdit
+                                            const edit = new vscode.WorkspaceEdit();
+    
+                                            // 若檔案不存在則建立並覆寫檔案內容
+                                            edit.createFile(newFileUri, { overwrite: true });
+                                            edit.insert(newFileUri, new vscode.Position(0, 0), payload.content);
+    
+                                            // 執行寫入動作
+                                            await vscode.workspace.applyEdit(edit);
+    
+                                            // 連帶把剛建立的檔案打開讓開發者看
+                                            const doc = await vscode.workspace.openTextDocument(newFileUri);
+                                            await vscode.window.showTextDocument(doc, { preview: false });
+    
+                                            // 在介面上彈出成功通知
+                                            vscode.window.showInformationMessage(`✅ CodeGuardian: 已自動生成測試檔 ${payload.filename}`);
+                                            stream.markdown(`✅ 已自動生成測試檔 \`${payload.filename}\`，並已打開編輯器。`);
+    
+                                        }
+                                    }
+                                } catch (parseErr:any) {
+                                    console.error("解析 action 事件失敗:", parseErr);
+                                }
                             }
                         }
                     }
