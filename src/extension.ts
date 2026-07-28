@@ -3,6 +3,8 @@ import * as vscode from 'vscode';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 
+import { GuardianCodeLensProvider } from './provider/GuardianCodeLensProvider';
+
 const execAsync = promisify(exec);
 
 export function activate(context: vscode.ExtensionContext) {
@@ -213,6 +215,14 @@ ${fullFileText}
             [{ language: 'java' }, { language: 'typescript' }], 
             new GuardianCodeActionProvider(),
             { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] }
+        )
+    );
+
+    // 將 CodeLens 註冊到 Java 與 TypeScript 檔案
+    context.subscriptions.push(
+        vscode.languages.registerCodeLensProvider(
+            [{ language: 'java' }, { language: 'typescript' }],
+            new GuardianCodeLensProvider()
         )
     );
 
